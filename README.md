@@ -6,6 +6,10 @@ ghidra_kernelcache를 업데이트했습니다!
 PAC 외부 참조, 사용자 정의 클래스 구성 기능을 갖춘
 더 나은 클래스 정의, dwarf4 등과 호환됩니다. 확인해 보세요.
 
+
+And if you lean more toward IDA, 
+you can also import the C header from Ghidra and parse it there :-)
+![7](7.jpg)
 ## 설명
 This framework is the end product of my experience in Kernelcache reverse engineering , I usually look for vulnerabilities by manually auditing the kernel and its extensions and have automated most of the things that I really wanted to see in Ghidra to speed up the process of reversing, and this has proven to be effective and saves a lot of time. 
 The framework works on iOS 12/13/14/15 and on macOS 11/12  (both kernelcache and single KEXT) and has been made to the public with the intention to help people to start researching on iOS kernel without the struggle of preparing their own environment.
