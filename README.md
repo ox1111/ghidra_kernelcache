@@ -10,6 +10,145 @@ PAC 외부 참조, 사용자 정의 클래스 구성 기능을 갖춘
 And if you lean more toward IDA, 
 you can also import the C header from Ghidra and parse it there :-)
 ![7](7.jpg)
+
+
+Looks like Ghidra does not support LC_DYLD_CHAINED_FIXUPS 
+for macOS M1 KEXTs, here is a dirty script to fix it .
+
+depac.py
+```python
+# Fixing LC_DYLD_CHAINED_FIXUPS for macOS M1 kext drivers
+# -*- coding: utf-8 -*-
+#@category macOS.kext
+
+from  generic.continues import RethrowContinuesFactory
+from  ghidra.app.script import GhidraScript
+from  ghidra.app.util.bin import ByteProvider, RandomAccessByteProvider, BinaryReader
+from  ghidra.app.util.bin.format.macho import MachHeader,Section, commands
+from  ghidra.program.model.address import Address
+from  java.io import File
+from  java.io import ByteArrayInputStream;
+from ghidra.program.model.data import PointerDataType
+import struct
+
+MH_EXECUTE =                   0x00000002
+MH_KEXT_BUNDLE =               0x0000000b
+LC_DYLD_CHAINED_FIXUPS =       0x80000034
+
+def depac():
+    print "[+] Fixing PAC'd pointers ... ",
+    f = File( currentProgram.getExecutablePath())
+    assert f.exists() == True
+    mem = currentProgram.getMemory()
+    image_base = currentProgram.getImageBase()
+    provider = RandomAccessByteProvider(f)
+    header = MachHeader.createMachHeader( RethrowContinuesFactory.INSTANCE, provider )
+    header.parse()
+
+    if header.getFileType() != MH_KEXT_BUNDLE:
+        print "Kernel image not supported, only KEXT"
+        return
+
+    depac_kext(provider,header)
+
+def depac_kext(provider,header):
+    read64 = lambda off: struct.unpack("<Q",br.readByteArray(off,8))[0]
+    read32 = lambda off: struct.unpack("<I",br.readByteArray(off,4))[0]
+
+    image_base = currentProgram.getImageBase()
+
+    cmds = header.getLoadCommands()
+    mem = currentProgram.getMemory()
+    listing = currentProgram.getListing()
+    tcmd = None
+    for cmd in cmds:
+        if cmd.getCommandType() & 0xffffffff != LC_DYLD_CHAINED_FIXUPS:
+            continue
+        tcmd = cmd
+        break
+
+    assert tcmd != None
+    index =  tcmd.getStartIndex()
+
+    br = BinaryReader(provider,True)
+    ll = br.readIntArray(index,cmd.getCommandSize()/4)
+
+    cmd = ll[0] & 0xffffffff
+    cmdsize = ll[1]
+    dataoff = ll[2]
+    datasize = ll[3]
+
+    off = dataoff
+    fixup =br.readIntArray(dataoff,7)
+    symbols_offset = fixup[3]
+    imports_offset = fixup[2]
+    starts_offset = fixup[1]
+
+    import_off = dataoff + imports_offset
+
+    syms_off = dataoff + symbols_offset
+    segs_off = off + starts_offset
+    segs_count = read32(segs_off)
+    segs = br.readIntArray(segs_off + 4,segs_count)
+
+    for seg_i in range(segs_count):
+        if segs[seg_i] == 0:
+            continue
+
+        starts_off = segs_off + segs[seg_i]
+        starts = br.readByteArray(starts_off,24)
+        tmp = struct.unpack("<IHHQIHH",starts)
+        page_count = tmp[5]
+        page_starts = br.readByteArray(starts_off+22,page_count*2)
+        page_starts = struct.unpack("<"+"H" * page_count,page_starts)
+        page_size, segment_offset = tmp[1],tmp[3]
+
+        i = 0
+        for idx in page_starts:
+            if idx == 0xffff:
+                continue
+
+            addr = image_base.add(segment_offset + i * page_size + idx )
+            off = segment_offset + i * page_size + idx
+            i+=1
+            while True and monitor.isCancelled() == False:
+                content = read64(off)
+                offset = content & 0xffffffff
+                nxt = (content >> 51) & 2047
+                bind = (content >> 62) & 1
+                tag = (content >> 32) & 0xffff
+                if bind == 1:
+                    name_off = read32(import_off + offset * 4)
+                    name_off = (name_off >> 9)
+                    symbol = br.readAsciiString(syms_off + name_off )
+
+                    symbolTable = currentProgram.getSymbolTable()
+                    ns = symbolTable.getNamespace("Global",None)
+                    sm = symbolTable.getSymbol(symbol,ns)
+                    if sm != None:
+                        sym_addr = sm.getAddress().toString()
+                    b = struct.pack("<Q",int(sym_addr,16))
+                    mem.setBytes(addr,b,0,8)
+                else:
+                    target = image_base.add(offset)
+                    b = struct.pack("<Q",int(target.toString(),16))
+                    mem.setBytes(addr,b,0,8)
+
+                listing.clearCodeUnits(addr,addr.add(8),False)
+                listing.createData(addr,PointerDataType())
+                skip = nxt * 4
+                addr = addr.add(skip)
+                off+=skip
+                if skip == 0:
+                    break
+    print "OK"
+
+
+if __name__ == "__main__":
+    depac()
+
+```
+
 ## 설명
 This framework is the end product of my experience in Kernelcache reverse engineering , I usually look for vulnerabilities by manually auditing the kernel and its extensions and have automated most of the things that I really wanted to see in Ghidra to speed up the process of reversing, and this has proven to be effective and saves a lot of time. 
 The framework works on iOS 12/13/14/15 and on macOS 11/12  (both kernelcache and single KEXT) and has been made to the public with the intention to help people to start researching on iOS kernel without the struggle of preparing their own environment.
